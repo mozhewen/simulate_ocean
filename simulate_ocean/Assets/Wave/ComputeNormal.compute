@@ -1,0 +1,23 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// 常量（需与 MATLAB 生成原始数据所用的参数一致）
+static const uint p = 9;
+static const uint N = 1 << p;
+static const float d = 20.0f /* m */;
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture2D<float4> waveform;
+RWTexture2D<float4> waveformNormal;
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+	// TODO: insert actual code here!
+    float3 a = (waveform[uint2((id.x + N + 1) % N, id.y)] - waveform[uint2((id.x + N - 1) % N, id.y)]).xyz,
+           b = (waveform[uint2(id.x, (id.y + N + 1) % N)] - waveform[uint2(id.x, (id.y - 1 + N) % N)]).xyz;
+    a.x += 2 * d / N;
+    b.z += 2 * d / N;
+    waveformNormal[id.xy] = float4(normalize(cross(b, a)), 0);
+}

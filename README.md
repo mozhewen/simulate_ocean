@@ -1,2 +1,7 @@
 # simulate_ocean
-An attempt to simulate the ocean surface via compute shaders
+
+An attempt to simulate ocean surface via compute shaders
+
+## Demo
+
+![demo](demo.gif)

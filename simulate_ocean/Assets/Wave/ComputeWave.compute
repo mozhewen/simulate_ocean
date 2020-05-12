@@ -1,0 +1,121 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel InitialMain
+#pragma kernel FinalMain
+
+static const float PI = 3.14159265f;
+// 常量（需与 MATLAB 生成原始数据所用的参数一致）
+static const uint p = 9;
+static const uint N = 1 << p;
+static const float d = 20.0f /* m */;
+static const float g = 9.8f /* m/s^2 */;
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWStructuredBuffer<float2> spectrumBuffer;
+float dtime;
+RWStructuredBuffer<float4> semiFinishedBuffer;
+RWTexture2D<float4> waveform;
+RWTexture2D<float4> waveformNormal;
+
+
+inline void MulByPhase(inout float2 z, float phi)
+{
+    float c, s;
+    sincos(phi, s, c);
+    float temp = z.r * c + z.g * s;
+    z.g = z.g *c - z.r * s;
+    z.r = temp;
+}
+
+groupshared float4 pingPongArray[4][N];
+
+inline void GetButterflyValues(in uint iter, in uint idx, out uint2 idxPre, out float2 weight)
+{
+    uint n = 1 << iter;
+    uint mask = n >> 1;
+
+    idxPre.x = idx & ~mask;
+    idxPre.y = idx | mask;
+    sincos(2.0f * PI * (idx & (n - 1)) / n, weight.y, weight.x);
+    // weight.y = -weight.y; （不需要，因为是波矢的变换， * exp(ikx)）
+}
+
+void ButterflyPass(in uint iter, in uint idx, out float4 resultRe, out float4 resultIm)
+{
+    uint2 idxPre;
+    float2 weight;
+    float4 elem1Re, elem1Im, elem2Re, elem2Im;
+    uint parity = (~iter) & 1;
+
+    GetButterflyValues(iter, idx, idxPre, weight);
+    elem1Re = pingPongArray[parity][idxPre.x];
+    elem1Im = pingPongArray[parity + 2][idxPre.x];
+    elem2Re = pingPongArray[parity][idxPre.y];
+    elem2Im = pingPongArray[parity + 2][idxPre.y];
+    resultRe = elem1Re + weight.r * elem2Re - weight.g * elem2Im;
+    resultIm = elem1Im + weight.r * elem2Im + weight.g * elem2Re;
+}
+
+[numthreads(N, 1, 1)]
+void InitialMain(uint3 id : SV_DispatchThreadID)
+{
+	// TODO: insert actual code here!
+    // 1. 空间频谱随时间演化
+    //   波矢（uint -> int 类型转换很重要！）
+    float kx = 2 * PI * ((int) ((id.x + N / 2) % N - N / 2)) / d;
+    float kz = 2 * PI * ((int) ((id.y + N / 2) % N - N / 2)) / d;
+    float k = sqrt(kx * kx + kz * kz);
+    //   色散关系
+    float omega = sqrt(g * k);
+    //   更新频谱数据（复数）
+    MulByPhase(spectrumBuffer[id.x + N * id.y], omega * dtime);
+    float2 h = spectrumBuffer[id.x + N * id.y];
+
+    // 2. FFT 第一遍
+    uint idxRev = 0;
+    for (uint s = 0; s < p; s++)
+    {
+        idxRev = (idxRev << 1) | ((id.x >> s) & 1);
+    }
+    //idxRev = reversebits(idx) >> (32 - p); // 遗弃
+    //   振幅的实部与虚部
+    if (k < 1e-6) k = 1.0f;
+    pingPongArray[0][idxRev] = float4(-kx / k, 1, -kz / k, 0) * h.r;
+    pingPongArray[2][idxRev] = float4(-kx / k, 1, -kz / k, 0) * h.g;
+    uint i;
+    for (i = 1; i < p; i++)
+    {
+        GroupMemoryBarrierWithGroupSync();
+        ButterflyPass(i, id.x, pingPongArray[i & 1][id.x], pingPongArray[(i & 1) + 2][id.x]);
+    }
+    //   i = p
+    GroupMemoryBarrierWithGroupSync();
+    ButterflyPass(p, id.x, semiFinishedBuffer[2 * (id.x + N * id.y)], semiFinishedBuffer[2 * (id.x + N * id.y) + 1]);
+}
+
+[numthreads(N, 1, 1)]
+void FinalMain(uint3 id : SV_DispatchThreadID)
+{
+	// TODO: insert actual code here!
+    // 2. FFT 第二遍
+    uint idxRev = 0;
+    for (uint s = 0; s < p; s++)
+    {
+        idxRev = (idxRev << 1) | ((id.x >> s) & 1);
+    }
+    //idxRev = reversebits(idx) >> (32 - p); // 遗弃
+    pingPongArray[0][idxRev] = semiFinishedBuffer[2 * (id.y + N * id.x)];
+    pingPongArray[2][idxRev] = semiFinishedBuffer[2 * (id.y + N * id.x) + 1];
+    uint i;
+    for (i = 1; i < p; i++)
+    {
+        GroupMemoryBarrierWithGroupSync();
+        ButterflyPass(i, id.x, pingPongArray[i & 1][id.x], pingPongArray[(i & 1) + 2][id.x]);
+    }
+    //   i = p
+    GroupMemoryBarrierWithGroupSync();
+    float4 re, im;
+    ButterflyPass(p, id.x, re, im);
+    //   输出
+    waveform[id.yx] = float4(im.x, re.y, im.z, 0);
+}
